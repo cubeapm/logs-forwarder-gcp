@@ -32,13 +32,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-LOG_ENDPOINT = os.environ.get("LOG_ENDPOINT")
+LOG_ENDPOINT = os.environ.get("LOG_ENDPOINT") or "https://4b4f796f2628.ngrok-free.app/api/logs/insert/jsonline"
 if not LOG_ENDPOINT:
     raise ValueError("LOG_ENDPOINT environment variable is required")
 
 # Pub/Sub Configuration
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT") or "able-reef-466806-u4"
-SUBSCRIPTION_NAME = os.environ.get("PUBSUB_SUBSCRIPTION")
+SUBSCRIPTION_NAME = os.environ.get("PUBSUB_SUBSCRIPTION") or "projects/able-reef-466806-u4/subscriptions/pull-subs"
 if not PROJECT_ID or not SUBSCRIPTION_NAME:
     raise ValueError("GOOGLE_CLOUD_PROJECT and PUBSUB_SUBSCRIPTION environment variables are required")
 
@@ -197,36 +197,23 @@ def start_health_server():
     from http.server import HTTPServer, BaseHTTPRequestHandler
     
     class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/health':
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                response = {
-                    'status': 'healthy',
-                    'processed_count': processed_count,
-                    'error_count': error_count,
-                    'uptime': time.time() - start_time
-                }
-                self.wfile.write(json.dumps(response).encode())
-            else:
-                self.send_response(404)
-                self.end_headers()
-    
-    server = HTTPServer(('0.0.0.0', 8000), HealthHandler)
-    logger.info("Health check server started on port 8000")
-    
-    # Run server in a separate thread
-    def run_server():
-        while not shutdown_event.is_set():
-            server.handle_request()
-    
-    health_thread = threading.Thread(target=run_server, daemon=True)
-    health_thread.start()
+      def do_GET(self):
+          if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = {
+                'status': 'healthy',
+                'processed_count': processed_count,
+                'error_count': error_count,
+                'uptime': time.time() - start_time
+            }
+            self.wfile.write(json.dumps(response).encode())
+
+    port = int(os.environ.get("PORT", "8080"))
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    logger.info(f"Health check server started on port {port}")
     return server
-
-
-
 
 def ship_logs(log_entries: List[str], source: str) -> bool:
   """Ship multiple log entries to CubeAPM endpoint"""
@@ -287,57 +274,39 @@ def post_log(payload: bytes, headers: Dict[str, str], source: str) -> bool:
     return False
 
 def main():
-    """Main function to start the Pub/Sub subscriber"""
     global start_time
     start_time = time.time()
-    
-    # Set up signal handlers for graceful shutdown
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     logger.info("Starting GCP Log Forwarder...")
     logger.info(f"Project ID: {PROJECT_ID}")
     logger.info(f"Subscription: {SUBSCRIPTION_NAME}")
     logger.info(f"Log Endpoint: {LOG_ENDPOINT}")
-    
-    # Start health check server
-    start_health_server()
-    
-    # Initialize Pub/Sub subscriber
+
+    server = start_health_server()
+
+    threading.Thread(
+        target=server.serve_forever,
+        daemon=True
+    ).start()
+
     subscriber = pubsub_v1.SubscriberClient()
-    subscription_path = subscriber.subscription_path(PROJECT_ID, SUBSCRIPTION_NAME)
-    
-    # Configure flow control settings
+    # subscription_path = subscriber.subscription_path(PROJECT_ID, SUBSCRIPTION_NAME)
+    subscription_path = SUBSCRIPTION_NAME
+
     flow_control = pubsub_v1.types.FlowControl(max_messages=MAX_MESSAGES)
-    
-    logger.info(f"Starting to pull messages from subscription: {subscription_path}")
-    
+
+    streaming_pull_future = subscriber.subscribe(
+        subscription_path,
+        callback=message_callback,
+        flow_control=flow_control,
+    )
+    logger.info("Streaming subscription started")
+
     try:
-        # Start pulling messages
-        streaming_pull_future = subscriber.pull(
-            request={"subscription": subscription_path, "max_messages": MAX_MESSAGES},
-            callback=message_callback,
-            flow_control=flow_control,
-            timeout=ACK_DEADLINE
-        )
-        
-        logger.info("Successfully started message pulling")
-        
-        # Wait for shutdown signal
-        while not shutdown_event.is_set():
-            time.sleep(1)
-            
+        streaming_pull_future.result()
     except Exception as e:
-        logger.error(f"Error in main loop: {e}")
-    finally:
-        logger.info("Shutting down...")
-        if 'streaming_pull_future' in locals():
-            streaming_pull_future.cancel()
-            streaming_pull_future.result()  # Block until the shutdown is complete
-        
-        logger.info(f"Final stats - Processed: {processed_count}, Errors: {error_count}")
-        logger.info("Shutdown complete")
+        logger.error(f"Streaming pull stopped: {e}")
 
-
-if __name__ == "__main__":
-    main()
