@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Any
 
 from google.cloud import pubsub_v1
+from flask import Flask, jsonify
 
 # Configure logging
 logging.basicConfig(
@@ -192,45 +193,33 @@ def signal_handler(signum, frame):
     shutdown_event.set()
 
 
-def start_health_server():
-    """Start a simple HTTP server for health checks"""
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    
-    class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/health':
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                response = {
-                    'status': 'healthy',
-                    'processed_count': processed_count,
-                    'error_count': error_count,
-                    'uptime': time.time() - start_time
-                }
-                self.wfile.write(json.dumps(response).encode())
-            else:
-                self.send_response(404)
-                self.end_headers()
-        
-        def log_message(self, format, *args):
-            # Suppress default logging
-            pass
+# Initialize Flask app
+app = Flask(__name__)
 
+@app.route("/health")
+def health():
+    return jsonify({
+        'status': 'healthy',
+        'processed_count': processed_count,
+        'error_count': error_count,
+        'uptime': time.time() - start_time
+    }), 200
+
+def start_health_server():
+    """Start Flask server for health checks"""
     port = int(os.environ.get("PORT", "8080"))
-    server = HTTPServer(('0.0.0.0', port), HealthHandler)
     logger.info(f"Health check server started on port {port}")
     
-    # Run server in a separate thread
+    # Run Flask server in a separate thread
     def run_server():
         try:
-            server.serve_forever()
+            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
         except Exception as e:
             logger.error(f"Health server error: {e}")
     
     health_thread = threading.Thread(target=run_server, daemon=True)
     health_thread.start()
-    return server
+    return app
 
 def ship_logs(log_entries: List[str], source: str) -> bool:
   """Ship multiple log entries to CubeAPM endpoint"""
