@@ -1,7 +1,7 @@
 """
-GCP Cloud Function Log Forwarder for ALB and other GCP logs
+GCP Log Forwarder for ALB and other GCP logs
 
-Processes GCP Pub/Sub messages containing log entries and forwards them to CubeAPM.
+Pulls GCP Pub/Sub messages containing log entries and forwards them to CubeAPM.
 """
 
 import base64
@@ -9,33 +9,55 @@ import gzip
 import json
 import logging
 import os
+import signal
 import socket
 import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import functions_framework
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Any
 
-# Configure logging for GCP Cloud Functions
+from google.cloud import pubsub_v1
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     stream=sys.stdout,
-    force=True  # Force reconfiguration
+    force=True
 )
 logger = logging.getLogger(__name__)
 
 # Configuration
-LOG_ENDPOINT = os.environ.get("LOG_ENDPOINT") or "https://4b4f796f2628.ngrok-free.app/api/logs/insert/jsonline"
+LOG_ENDPOINT = os.environ.get("LOG_ENDPOINT")
 if not LOG_ENDPOINT:
-  raise ValueError("LOG_ENDPOINT environment variable is required")
+    raise ValueError("LOG_ENDPOINT environment variable is required")
 
+# Pub/Sub Configuration
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT") or "able-reef-466806-u4"
+SUBSCRIPTION_NAME = os.environ.get("PUBSUB_SUBSCRIPTION")
+if not PROJECT_ID or not SUBSCRIPTION_NAME:
+    raise ValueError("GOOGLE_CLOUD_PROJECT and PUBSUB_SUBSCRIPTION environment variables are required")
+
+# CubeAPM Configuration
 CUBE_ENVIRONMENT_KEY = os.environ.get("CUBE_ENVIRONMENT_KEY", "cube.environment")
 CUBE_ENVIRONMENT = os.environ.get("CUBE_ENVIRONMENT")
 CUBE_EXTRA_FIELDS = os.environ.get("CUBE_EXTRA_FIELDS", "")
 CUBE_STREAM_FIELDS = os.environ.get("CUBE_STREAM_FIELDS", "event.domain")
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "60"))
+
+# Processing Configuration
+MAX_MESSAGES = int(os.environ.get("MAX_MESSAGES", "100"))
+ACK_DEADLINE = int(os.environ.get("ACK_DEADLINE", "60"))
+PROCESSING_TIMEOUT = int(os.environ.get("PROCESSING_TIMEOUT", "300"))
+
+# Global variables for graceful shutdown
+shutdown_event = threading.Event()
+processed_count = 0
+error_count = 0
 
 
 def is_alb_log(log_entry: Dict[str, Any]) -> bool:
@@ -76,12 +98,132 @@ def flatten_dict(obj: Dict[str, Any], parent_key: str = '', sep: str = '.') -> D
 
 
 def process_alb_logs(log_entry: Dict[str, Any]) -> str:
-  """Process ALB/HTTP Load Balancer logs - returns JSON string"""
-  flattened_log = flatten_dict(log_entry)
-  flattened_log["event.domain"] = "gcp.alb"
-  if CUBE_ENVIRONMENT:
-    flattened_log[CUBE_ENVIRONMENT_KEY] = CUBE_ENVIRONMENT
-  return json.dumps(flattened_log)
+    """Process ALB/HTTP Load Balancer logs - returns JSON string"""
+    flattened_log = flatten_dict(log_entry)
+    flattened_log["event.domain"] = "gcp.alb"
+    if CUBE_ENVIRONMENT:
+        flattened_log[CUBE_ENVIRONMENT_KEY] = CUBE_ENVIRONMENT
+    return json.dumps(flattened_log)
+
+
+def process_pubsub_message(message_data: bytes, message_id: str) -> bool:
+    """Process a single Pub/Sub message containing log entries"""
+    global processed_count, error_count
+    
+    try:
+        # Decode the message data
+        decoded_str = message_data.decode("utf-8")
+        logger.info(f"Processing Pub/Sub message (message_id: {message_id})")
+        
+        # Parse the decoded message - could be a single log entry or an array of entries
+        parsed_data = json.loads(decoded_str)
+        
+        # Handle both single log entry and array of log entries
+        if isinstance(parsed_data, list):
+            log_entries = parsed_data
+            logger.info(f"Processing {len(log_entries)} log entries (message_id: {message_id})")
+        else:
+            log_entries = [parsed_data]
+            logger.info(f"Processing single log entry (message_id: {message_id})")
+        
+        # Process each log entry
+        processed_logs = []
+        alb_count = 0
+        skipped_count = 0
+        
+        for i, log_entry in enumerate(log_entries):
+            if is_alb_log(log_entry):
+                logger.info(f"Processing ALB log entry {i+1}/{len(log_entries)} (message_id: {message_id})")
+                processed_log = process_alb_logs(log_entry)
+                processed_logs.append(processed_log)
+                alb_count += 1
+            else:
+                logger.info(f"Skipping unknown log entry {i+1}/{len(log_entries)} (message_id: {message_id})")
+                skipped_count += 1
+        
+        # Ship all processed logs together
+        if processed_logs:
+            success = ship_logs(processed_logs, f"pubsub_message_{message_id}")
+            
+            if success:
+                logger.info(f"Successfully processed {alb_count} ALB log entries (message_id: {message_id})")
+                processed_count += alb_count
+                return True
+            else:
+                logger.error(f"Failed to ship ALB logs (message_id: {message_id})")
+                error_count += 1
+                return False
+        else:
+            logger.info(f"No ALB logs found in message (message_id: {message_id})")
+            return True
+            
+    except Exception as e:
+        logger.error(f"Error processing Pub/Sub message (message_id: {message_id}): {e}")
+        error_count += 1
+        return False
+
+
+def message_callback(message):
+    """Callback function for Pub/Sub messages"""
+    try:
+        message_id = message.message_id or 'unknown'
+        logger.info(f"Received message (message_id: {message_id})")
+        
+        # Process the message
+        success = process_pubsub_message(message.data, message_id)
+        
+        if success:
+            # Acknowledge the message
+            message.ack()
+            logger.info(f"Message acknowledged (message_id: {message_id})")
+        else:
+            # Nack the message to retry later
+            message.nack()
+            logger.warning(f"Message nacked for retry (message_id: {message_id})")
+            
+    except Exception as e:
+        logger.error(f"Error in message callback: {e}")
+        message.nack()
+
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
+    logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+    shutdown_event.set()
+
+
+def start_health_server():
+    """Start a simple HTTP server for health checks"""
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/health':
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                response = {
+                    'status': 'healthy',
+                    'processed_count': processed_count,
+                    'error_count': error_count,
+                    'uptime': time.time() - start_time
+                }
+                self.wfile.write(json.dumps(response).encode())
+            else:
+                self.send_response(404)
+                self.end_headers()
+    
+    server = HTTPServer(('0.0.0.0', 8000), HealthHandler)
+    logger.info("Health check server started on port 8000")
+    
+    # Run server in a separate thread
+    def run_server():
+        while not shutdown_event.is_set():
+            server.handle_request()
+    
+    health_thread = threading.Thread(target=run_server, daemon=True)
+    health_thread.start()
+    return server
 
 
 
@@ -144,120 +286,58 @@ def post_log(payload: bytes, headers: Dict[str, str], source: str) -> bool:
     logger.error(f"Network error for {source}: {e}")
     return False
 
-@functions_framework.cloud_event
-def cloud_function_handler(cloud_event):
-  """Main Cloud Function handler for Pub/Sub messages - ALB logs only"""
-  
-  message_id = cloud_event.data["message"].get('messageId', 'unknown')
-  decoded_str = None
-  
-  # Log function start
-  logger.info(f"Cloud Function started processing message (message_id: {message_id})")
-  # flush_logs()
-  
-  try:
-    encoded_data = cloud_event.data["message"]["data"]
-    decoded_bytes = base64.b64decode(encoded_data)
-    decoded_str = decoded_bytes.decode("utf-8")
+def main():
+    """Main function to start the Pub/Sub subscriber"""
+    global start_time
+    start_time = time.time()
     
-    logger.info(f"Processing log entries from Pub/Sub (message_id: {message_id})")
-    # flush_logs()
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
-    # Parse the decoded message - could be a single log entry or an array of entries
-    parsed_data = json.loads(decoded_str)
+    logger.info("Starting GCP Log Forwarder...")
+    logger.info(f"Project ID: {PROJECT_ID}")
+    logger.info(f"Subscription: {SUBSCRIPTION_NAME}")
+    logger.info(f"Log Endpoint: {LOG_ENDPOINT}")
     
-    # Handle both single log entry and array of log entries
-    if isinstance(parsed_data, list):
-      log_entries = parsed_data
-      logger.info(f"Processing {len(log_entries)} log entries (message_id: {message_id})")
-    else:
-      log_entries = [parsed_data]
-      logger.info(f"Processing single log entry (message_id: {message_id})")
+    # Start health check server
+    start_health_server()
     
-    # flush_logs()
+    # Initialize Pub/Sub subscriber
+    subscriber = pubsub_v1.SubscriberClient()
+    subscription_path = subscriber.subscription_path(PROJECT_ID, SUBSCRIPTION_NAME)
     
-    # Process each log entry
-    processed_logs = []
-    alb_count = 0
-    skipped_count = 0
+    # Configure flow control settings
+    flow_control = pubsub_v1.types.FlowControl(max_messages=MAX_MESSAGES)
     
-    for i, log_entry in enumerate(log_entries):
-      if is_alb_log(log_entry):
-        logger.info(f"Processing ALB log entry {i+1}/{len(log_entries)} (message_id: {message_id})")
-        processed_log = process_alb_logs(log_entry)
-        processed_logs.append(processed_log)
-        alb_count += 1
-      else:
-        logger.info(f"Skipping unknown log entry {i+1}/{len(log_entries)} (message_id: {message_id})")
-        skipped_count += 1
+    logger.info(f"Starting to pull messages from subscription: {subscription_path}")
     
-    # Ship all processed logs together
-    if processed_logs:
-      success = ship_logs(processed_logs, "pubsub_message_alb")
-      
-      if success:
-        logger.info(f"Successfully processed {alb_count} ALB log entries (message_id: {message_id})")
-        # flush_logs()
-        return {
-          'statusCode': 200,
-          'body': {
-            'message': 'ALB log processing complete',
-            'message_id': message_id,
-            'log_type': 'alb',
-            'success': True,
-            'processed_count': alb_count,
-            'skipped_count': skipped_count,
-            'total_count': len(log_entries),
-            'error_message': None
-          }
-        }
-      else:
-        logger.error(f"Failed to ship ALB logs (message_id: {message_id})")
-        return {
-          'statusCode': 500,
-          'body': {
-            'message': 'ALB log shipping failed',
-            'message_id': message_id,
-            'log_type': 'alb',
-            'success': False,
-            'processed_count': alb_count,
-            'skipped_count': skipped_count,
-            'total_count': len(log_entries),
-            'error_message': "Failed to ship logs"
-          }
-        }
-    else:
-      logger.info(f"No ALB logs found in message (message_id: {message_id})")
-      return {
-        'statusCode': 200,
-        'body': {
-          'message': 'No ALB logs found',
-          'message_id': message_id,
-          'log_type': 'unknown',
-          'success': True,
-          'processed_count': 0,
-          'skipped_count': skipped_count,
-          'total_count': len(log_entries),
-          'error_message': 'No ALB logs to process'
-        }
-      }
-      
-  except Exception as e:
-    if decoded_str:
-      logger.error(f"Error processing Pub/Sub message (message_id: {message_id}): {e}")
-      logger.error(f"Problematic message content: {decoded_str[:500]}{'...' if len(decoded_str) > 500 else ''}")
-    else:
-      logger.error(f"Error processing Pub/Sub message (message_id: {message_id}): {e}")
-      logger.error(f"Failed to decode message data")
-    
-    return {
-      'statusCode': 500,
-      'body': {
-        'message': 'Processing error',
-        'message_id': message_id,
-        'log_type': 'alb',
-        'success': False,
-        'processed_count': 0,
-        'error_message': f"Processing error: {e}"
-      }
-    }
+    try:
+        # Start pulling messages
+        streaming_pull_future = subscriber.pull(
+            request={"subscription": subscription_path, "max_messages": MAX_MESSAGES},
+            callback=message_callback,
+            flow_control=flow_control,
+            timeout=ACK_DEADLINE
+        )
+        
+        logger.info("Successfully started message pulling")
+        
+        # Wait for shutdown signal
+        while not shutdown_event.is_set():
+            time.sleep(1)
+            
+    except Exception as e:
+        logger.error(f"Error in main loop: {e}")
+    finally:
+        logger.info("Shutting down...")
+        if 'streaming_pull_future' in locals():
+            streaming_pull_future.cancel()
+            streaming_pull_future.result()  # Block until the shutdown is complete
+        
+        logger.info(f"Final stats - Processed: {processed_count}, Errors: {error_count}")
+        logger.info("Shutdown complete")
+
+
+if __name__ == "__main__":
+    main()
