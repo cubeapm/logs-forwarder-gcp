@@ -1,0 +1,60 @@
+{
+  "insertId": "1r06yvkfc0qvtv",
+  "jsonPayload": {
+    "cacheDecision": [
+      "RESPONSE_HAS_ETAG",
+      "RESPONSE_HAS_CONTENT_TYPE",
+      "CACHE_MODE_CACHE_ALL_STATIC"
+    ],
+    "remoteIp": "35.187.114.229",
+    "@type": "type.googleapis.com/google.cloud.loadbalancing.type.LoadBalancerLogEntry",
+    "securityPolicyRequestData": {
+      "remoteIpInfo": {
+        "regionCode": "BE",
+        "asn": 15169
+      }
+    },
+    "backendTargetProjectNumber": "projects/1052567692022",
+    "enforcedSecurityPolicy": {
+      "outcome": "ACCEPT",
+      "configuredAction": "THROTTLE",
+      "priority": 2147483646,
+      "name": "default-security-policy-for-backend-service-backendservice",
+      "rateLimitAction": {
+        "key": "35.187.114.229",
+        "outcome": "RATE_LIMIT_THRESHOLD_CONFORM"
+      }
+    },
+    "statusDetails": "response_sent_by_backend",
+    "cacheId": "BRU"
+  },
+  "httpRequest": {
+    "requestMethod": "GET",
+    "requestUrl": "http://34.49.139.71/",
+    "requestSize": "143",
+    "status": 200,
+    "responseSize": "230",
+    "userAgent": "python-requests/2.32.5",
+    "remoteIp": "35.187.114.229",
+    "cacheLookup": true,
+    "serverIp": "10.190.0.9",
+    "latency": "1.499805s"
+  },
+  "resource": {
+    "type": "http_load_balancer",
+    "labels": {
+      "zone": "global",
+      "backend_service_name": "backendservice",
+      "url_map_name": "alb2",
+      "forwarding_rule_name": "alb2",
+      "project_id": "able-reef-466806-u4",
+      "target_proxy_name": "alb2-target-proxy"
+    }
+  },
+  "timestamp": "2025-10-24T11:24:50.267341Z",
+  "severity": "INFO",
+  "logName": "projects/able-reef-466806-u4/logs/requests",
+  "trace": "projects/able-reef-466806-u4/traces/95b949423775f53424d42bbff14de5ad",
+  "receiveTimestamp": "2025-10-24T11:24:52.987563195Z",
+  "spanId": "99925f7852c1b3c0"
+}

@@ -1,0 +1,8 @@
+# GCP Cloud Function Log Forwarder Dependencies
+# Core Python libraries (included in Cloud Functions runtime)
+# No additional dependencies required for basic functionality
+
+# Optional: For enhanced functionality, you might want to add:
+# google-cloud-logging>=3.0.0
+# google-cloud-pubsub>=2.0.0
+# requests>=2.25.0
