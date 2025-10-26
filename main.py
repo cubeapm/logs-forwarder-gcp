@@ -20,10 +20,10 @@ from flask import Flask, jsonify
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout,
-    force=True
+  level=logging.INFO,
+  format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+  stream=sys.stdout,
+  force=True
 )
 
 logger = logging.getLogger(__name__)
@@ -31,12 +31,12 @@ logger = logging.getLogger(__name__)
 # Configuration
 LOG_ENDPOINT = os.environ.get("LOG_ENDPOINT")
 if not LOG_ENDPOINT:
-    raise ValueError("LOG_ENDPOINT environment variable is required")
+  raise ValueError("LOG_ENDPOINT environment variable is required")
 
 # Pub/Sub Configuration
 SUBSCRIPTION_NAME = os.environ.get("PUBSUB_SUBSCRIPTION")
 if not SUBSCRIPTION_NAME:
-    raise ValueError("PUBSUB_SUBSCRIPTION environment variable is required")
+  raise ValueError("PUBSUB_SUBSCRIPTION environment variable is required")
 
 # CubeAPM Configuration
 CUBE_ENVIRONMENT_KEY = os.environ.get("CUBE_ENVIRONMENT_KEY", "cube.environment")
@@ -186,7 +186,6 @@ def main():
       
       logger.info(f"Received {len(response.received_messages)} messages from Pub/Sub")
       for message in response.received_messages:
-        logger.info("processing message", message)
         message_data = message.message.data
         if not message_data:
           logger.info("Received empty message data")
@@ -223,4 +222,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+  main()
