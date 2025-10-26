@@ -40,7 +40,7 @@ if not SUBSCRIPTION_NAME:
 
 # CubeAPM Configuration
 CUBE_ENVIRONMENT_KEY = os.environ.get("CUBE_ENVIRONMENT_KEY", "cube.environment")
-CUBE_ENVIRONMENT = os.environ.get("CUBE_ENVIRONMENT", "UNSET")
+CUBE_ENVIRONMENT = os.environ.get("CUBE_ENVIRONMENT")
 CUBE_EXTRA_FIELDS = os.environ.get("CUBE_EXTRA_FIELDS", "")
 CUBE_STREAM_FIELDS = os.environ.get("CUBE_STREAM_FIELDS", "event.domain")
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "60"))
@@ -61,10 +61,6 @@ def is_alb_log(log_entry: Dict[str, Any]) -> bool:
     resource_type = log_entry.get("resource", {}).get("type", "")
     if resource_type == "http_load_balancer":
       return True
-
-  log_name = log_entry.get("logName", "").lower()
-  if "requests" in log_name:
-    return True
 
   return False
 
@@ -101,7 +97,7 @@ def process_alb_logs(log_entry: Dict[str, Any]) -> str:
   return json.dumps(flattened_log)
 
 
-def signal_handler(signum, frame):
+def signal_handler(signum):
     """Handle shutdown signals gracefully"""
     logger.info(f"Received signal {signum}, initiating graceful shutdown...")
     shutdown_event.set()
@@ -178,7 +174,7 @@ def main():
         request={"subscription": subscription_path, "max_messages": MAX_MESSAGES}
       )
       if not response.received_messages:
-        time.sleep(1)  # No messages, wait a bit
+        time.sleep(5)  # No messages, wait a bit
         continue
                 
       all_logs = []
@@ -218,7 +214,7 @@ def main():
             
     except Exception as e:
       logger.error(f"Error in main loop: {e}")
-      time.sleep(5)
+      time.sleep(1)
 
 
 if __name__ == "__main__":

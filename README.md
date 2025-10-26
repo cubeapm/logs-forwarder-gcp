@@ -1,104 +1,75 @@
-# GCP Cloud Function Log Forwarder
+# GCP Log Forwarder for CubeAPM
 
 Processes GCP logs from Pub/Sub messages and forwards them to CubeAPM.
 
 ## Features
 
 - **ALB Log Processing**: HTTP Load Balancer access logs
-- **Generic Log Support**: Any GCP log format (flattened for processing)
-- **Retry Logic**: Exponential backoff for external API calls
 - **Data Compression**: gzip compression before transmission
-- **Environment Metadata**: Optional environment field support
 
-## Environment Variables
 
-**Required:**
-- `LOG_ENDPOINT` - Log ingestion endpoint URL
+#### 3. Set Up Environment Variables
+
+**Mandatory:**
+- `LOG_ENDPOINT`: Your CubeAPM logs endpoint
+  - Format: `http://<cubeapm-url>/api/logs/insert/jsonline`
+  - Example: `http://your-instance.cubeapm.com/api/logs/insert/jsonline`
+  - **Important**: Must include `/api/logs/insert/jsonline` path
+
+- `PUBSUB_SUBSCRIPTION`: Full subscription path
+  - Format: `projects/<PROJECT_ID>/subscriptions/<SUBSCRIPTION_NAME>`
+  - Example: `projects/your-project-123/subscriptions/gcp-logs-sub`
 
 **Optional:**
-- `CUBE_ENVIRONMENT_KEY` - Environment identifier key (default: cube.environment)
-- `CUBE_ENVIRONMENT` - Environment identifier (e.g., "production", "staging")
-- `CUBE_EXTRA_FIELDS` - Extra fields to add (format: key1=value1,key2=value2)
-- `MAX_RETRIES` - Retry attempts (default: 3)
-- `RETRY_BASE_DELAY` - Base delay for retry backoff in seconds (default: 1.0)
-- `REQUEST_TIMEOUT` - HTTP timeout in seconds (default: 60)
-- `CUBE_STREAM_FIELDS` - Stream fields for CubeAPM (default: "event.domain")
+- `CUBE_ENVIRONMENT`: Environment identifier (e.g., "production", "staging")
+- `CUBE_ENVIRONMENT_KEY`: Environment key field name (default: "cube.environment")
+- `CUBE_EXTRA_FIELDS`: Additional fields (format: `key1=value1,key2=value2`)
+- `CUBE_STREAM_FIELDS`: Stream fields for CubeAPM (default: "event.domain")
+- `MAX_MESSAGES`: Max messages to pull per batch (default: 100)
 
 ## Deployment
 
-1. **Set environment variables:**
-```bash
-export LOG_ENDPOINT="https://your-cubeapm-endpoint.com/logs"
-export PUBSUB_TOPIC="gcp-logs"
-export CUBE_ENVIRONMENT="production"
-```
+### Run as Cloud Run Service
 
-2. **Deploy the Cloud Function:**
 ```bash
-gcloud functions deploy logs-forwarder \
-  --runtime python39 \
-  --trigger-topic $PUBSUB_TOPIC \
-  --entry-point cloud_function_handler \
-  --set-env-vars LOG_ENDPOINT=$LOG_ENDPOINT \
-  --set-env-vars CUBE_ENVIRONMENT=$CUBE_ENVIRONMENT
+# Build and deploy
+gcloud run deploy logs-forwarder \
+  --source . \
+  --set-env-vars LOG_ENDPOINT=http://your-instance.cubeapm.com/api/logs/insert/jsonline \
+  --set-env-vars PUBSUB_SUBSCRIPTION=projects/$PROJECT_ID/subscriptions/$PUBSUB_SUB
 ```
-
-3. **Set up Pub/Sub topic:**
-```bash
-gcloud pubsub topics create gcp-logs
-```
-
-4. **Configure GCP log routing** to send logs to the Pub/Sub topic.
 
 ## Local Development
 
 ### Prerequisites
 
-Make sure you have Application Default Credentials set up:
+1. **Install Python dependencies:**
 ```bash
+pip install -r requirements.txt
+```
+
+2. **Set up GCP authentication:**
+```bash
+# Using application default credentials
 gcloud auth application-default login
+
+# Or download a service account key from GCP Console
+# Save it to your local machine (e.g., ~/path/to/key.json)
+export GOOGLE_APPLICATION_CREDENTIALS="~/path/to/key.json"
 ```
 
-This will create `~/.config/gcloud/application_default_credentials.json` which the Docker container will use for authentication.
+## Health Check
 
-### Running with Docker
-
-Build the Docker image:
-```bash
-docker build -t logs-forwarder-gcp .
+The forwarder includes a health check endpoint at `/health` on port 8080 that returns:
+```json
+{
+  "status": "healthy",
+  "uptime": 12345.67
+}
 ```
 
-Run locally with your gcloud credentials:
-```bash
-docker run -it --rm \
-  -v ~/.config/gcloud:/root/.config/gcloud \
-  -e GOOGLE_CLOUD_PROJECT="able-reef-466806-u4" \
-  -e PUBSUB_SUBSCRIPTION="projects/able-reef-466806-u4/subscriptions/pull-subs" \
-  -e LOG_ENDPOINT="https://your-endpoint.com/api/logs/insert/jsonline" \
-  -e CUBE_ENVIRONMENT="local" \
-  logs-forwarder-gcp
-```
+## Monitoring
 
-Or using a service account key:
-```bash
-docker run -it --rm \
-  -v /path/to/service-account-key.json:/tmp/key.json \
-  -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/key.json \
-  -e GOOGLE_CLOUD_PROJECT="able-reef-466806-u4" \
-  -e PUBSUB_SUBSCRIPTION="projects/able-reef-466806-u4/subscriptions/pull-subs" \
-  -e LOG_ENDPOINT="https://your-endpoint.com/api/logs/insert/jsonline" \
-  logs-forwarder-gcp
-```
-
-### Testing Without Docker
-
-Test locally with sample data:
-```bash
-LOG_ENDPOINT="https://test.example.com" python main.py
-```
-
-## Log Processing
-
-- **Input**: GCP log entries from Pub/Sub (base64 encoded)
-- **Output**: Flattened JSON with `event.domain` field
-- **Transmission**: JSON Lines format, gzip compressed
+- Check logs in GCP Console under Cloud Function/Cloud Run logs
+- Monitor health endpoint at `http://your-service-url/health:8080`
+- Verify logs are being received in your CubeAPM dashboard
