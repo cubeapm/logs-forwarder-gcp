@@ -30,18 +30,18 @@ logging.basicConfig(
     stream=sys.stdout,
     force=True
 )
+
 logger = logging.getLogger(__name__)
 
 # Configuration
-LOG_ENDPOINT = os.environ.get("LOG_ENDPOINT") or "https://4b4f796f2628.ngrok-free.app/api/logs/insert/jsonline"
+LOG_ENDPOINT = os.environ.get("LOG_ENDPOINT")
 if not LOG_ENDPOINT:
     raise ValueError("LOG_ENDPOINT environment variable is required")
 
 # Pub/Sub Configuration
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT") or "able-reef-466806-u4"
-SUBSCRIPTION_NAME = os.environ.get("PUBSUB_SUBSCRIPTION") or "projects/able-reef-466806-u4/subscriptions/pull-subs"
-if not PROJECT_ID or not SUBSCRIPTION_NAME:
-    raise ValueError("GOOGLE_CLOUD_PROJECT and PUBSUB_SUBSCRIPTION environment variables are required")
+SUBSCRIPTION_NAME = os.environ.get("PUBSUB_SUBSCRIPTION")
+if not SUBSCRIPTION_NAME:
+    raise ValueError("PUBSUB_SUBSCRIPTION environment variable is required")
 
 # CubeAPM Configuration
 CUBE_ENVIRONMENT_KEY = os.environ.get("CUBE_ENVIRONMENT_KEY", "cube.environment")
@@ -57,8 +57,7 @@ PROCESSING_TIMEOUT = int(os.environ.get("PROCESSING_TIMEOUT", "300"))
 
 # Global variables for graceful shutdown
 shutdown_event = threading.Event()
-processed_count = 0
-error_count = 0
+start_time = time.time()
 
 
 def is_alb_log(log_entry: Dict[str, Any]) -> bool:
@@ -99,92 +98,12 @@ def flatten_dict(obj: Dict[str, Any], parent_key: str = '', sep: str = '.') -> D
 
 
 def process_alb_logs(log_entry: Dict[str, Any]) -> str:
-    """Process ALB/HTTP Load Balancer logs - returns JSON string"""
-    flattened_log = flatten_dict(log_entry)
-    flattened_log["event.domain"] = "gcp.alb"
-    if CUBE_ENVIRONMENT:
-        flattened_log[CUBE_ENVIRONMENT_KEY] = CUBE_ENVIRONMENT
-    return json.dumps(flattened_log)
-
-
-def process_pubsub_message(message_data: bytes, message_id: str) -> bool:
-    """Process a single Pub/Sub message containing log entries"""
-    global processed_count, error_count
-    
-    try:
-        # Decode the message data
-        decoded_str = message_data.decode("utf-8")
-        logger.info(f"Processing Pub/Sub message (message_id: {message_id})")
-        
-        # Parse the decoded message - could be a single log entry or an array of entries
-        parsed_data = json.loads(decoded_str)
-        
-        # Handle both single log entry and array of log entries
-        if isinstance(parsed_data, list):
-            log_entries = parsed_data
-            logger.info(f"Processing {len(log_entries)} log entries (message_id: {message_id})")
-        else:
-            log_entries = [parsed_data]
-            logger.info(f"Processing single log entry (message_id: {message_id})")
-        
-        # Process each log entry
-        processed_logs = []
-        alb_count = 0
-        skipped_count = 0
-        
-        for i, log_entry in enumerate(log_entries):
-            if is_alb_log(log_entry):
-                logger.info(f"Processing ALB log entry {i+1}/{len(log_entries)} (message_id: {message_id})")
-                processed_log = process_alb_logs(log_entry)
-                processed_logs.append(processed_log)
-                alb_count += 1
-            else:
-                logger.info(f"Skipping unknown log entry {i+1}/{len(log_entries)} (message_id: {message_id})")
-                skipped_count += 1
-        
-        # Ship all processed logs together
-        if processed_logs:
-            success = ship_logs(processed_logs, f"pubsub_message_{message_id}")
-            
-            if success:
-                logger.info(f"Successfully processed {alb_count} ALB log entries (message_id: {message_id})")
-                processed_count += alb_count
-                return True
-            else:
-                logger.error(f"Failed to ship ALB logs (message_id: {message_id})")
-                error_count += 1
-                return False
-        else:
-            logger.info(f"No ALB logs found in message (message_id: {message_id})")
-            return True
-            
-    except Exception as e:
-        logger.error(f"Error processing Pub/Sub message (message_id: {message_id}): {e}")
-        error_count += 1
-        return False
-
-
-def message_callback(message):
-    """Callback function for Pub/Sub messages"""
-    try:
-        message_id = message.message_id or 'unknown'
-        logger.info(f"Received message (message_id: {message_id})")
-        
-        # Process the message
-        success = process_pubsub_message(message.data, message_id)
-        
-        if success:
-            # Acknowledge the message
-            message.ack()
-            logger.info(f"Message acknowledged (message_id: {message_id})")
-        else:
-            # Nack the message to retry later
-            message.nack()
-            logger.warning(f"Message nacked for retry (message_id: {message_id})")
-            
-    except Exception as e:
-        logger.error(f"Error in message callback: {e}")
-        message.nack()
+  """Process ALB/HTTP Load Balancer logs - returns JSON string"""
+  flattened_log = flatten_dict(log_entry)
+  flattened_log["event.domain"] = "gcp.alb"
+  if CUBE_ENVIRONMENT:
+      flattened_log[CUBE_ENVIRONMENT_KEY] = CUBE_ENVIRONMENT
+  return json.dumps(flattened_log)
 
 
 def signal_handler(signum, frame):
@@ -198,37 +117,31 @@ app = Flask(__name__)
 
 @app.route("/health")
 def health():
-    return jsonify({
-        'status': 'healthy',
-        'processed_count': processed_count,
-        'error_count': error_count,
-        'uptime': time.time() - start_time
-    }), 200
+  return jsonify({
+    'status': 'healthy',
+    'uptime': time.time() - start_time,
+  }), 200
 
 def start_health_server():
-    """Start Flask server for health checks"""
-    port = int(os.environ.get("PORT", "8080"))
-    logger.info(f"Health check server started on port {port}")
-    
-    # Run Flask server in a separate thread
-    def run_server():
-        try:
-            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-        except Exception as e:
-            logger.error(f"Health server error: {e}")
-    
-    health_thread = threading.Thread(target=run_server, daemon=True)
-    health_thread.start()
-    return app
+  """Start Flask server for health checks"""
+  port = int(os.environ.get("PORT", "8080"))
+  logger.info(f"Health check server started on port {port}")
+  
+  # Run Flask server in a separate thread
+  def run_server():
+    try:
+      app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    except Exception as e:
+      logger.error(f"Health server error: {e}")
+  health_thread = threading.Thread(target=run_server, daemon=True)
+  health_thread.start()
 
-def ship_logs(log_entries: List[str], source: str) -> bool:
+def ship_logs(log_entries: List[str]) -> bool:
   """Ship multiple log entries to CubeAPM endpoint"""
   if not log_entries:
-    logger.info("No log entries to ship")
     return True
   
   try:
-    # Join all log entries with newlines to create JSONL format
     jsonlines_payload = '\n'.join(log_entries) + '\n'
     gzipped_data = gzip.compress(jsonlines_payload.encode('utf-8'))
     
@@ -238,81 +151,77 @@ def ship_logs(log_entries: List[str], source: str) -> bool:
       'Cube-Stream-Fields': CUBE_STREAM_FIELDS,
       'Cube-Time-Field': 'timestamp'
     }
-    extra_fields = CUBE_EXTRA_FIELDS
-    if extra_fields:
-      headers['Cube-Extra-Fields'] = extra_fields  # key1=value1,key2=value2
+    if CUBE_EXTRA_FIELDS:
+      headers['Cube-Extra-Fields'] = CUBE_EXTRA_FIELDS
 
-    logger.info(f"Shipping {len(log_entries)} log entries (compressed size: {len(gzipped_data)} bytes) from {source}")
-    return post_log(gzipped_data, headers, source)
-    
-  except Exception as e:
-    logger.error(f"Failed to prepare logs for shipping: {e}. Source: {source}")
-    return False
-
-
-def post_log(payload: bytes, headers: Dict[str, str], source: str) -> bool:
-  """Post data to CubeAPM endpoint - single attempt"""
-  try:
-    request = urllib.request.Request(
-      LOG_ENDPOINT,
-      data=payload,
-      headers=headers,
-      method='POST'
-    )
-    
+    request = urllib.request.Request(LOG_ENDPOINT, data=gzipped_data, headers=headers, method='POST')
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
-      status_code = response.status
-      if 200 <= status_code < 300:
-        logger.info(f"Successfully shipped logs (status: {status_code}) from {source}")
-        return True
-      else:
-        response_text = response.read().decode('utf-8')
-        logger.error(f"HTTP error {status_code} for {source}: {response_text}")
-        return False
-        
-  except urllib.error.HTTPError as e:
-    error_text = e.read().decode('utf-8') if hasattr(e, 'read') else str(e)
-    logger.error(f"HTTP error {e.code} for {source}: {error_text}")
+      return 200 <= response.status < 300
+
+  except Exception as e:
+    logger.error(f"Failed to ship logs: {e}")
     return False
-    
-  except (urllib.error.URLError, socket.timeout, OSError) as e:
-    logger.error(f"Network error for {source}: {e}")
-    return False
+
 
 def main():
-    global start_time
-    start_time = time.time()
-
+  global processed_count, error_count
+    
+  try:
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+  except Exception as e:
+    logger.error(f"Error setting signal handlers: {e}")
 
-    logger.info("Starting GCP Log Forwarder...")
-    logger.info(f"Project ID: {PROJECT_ID}")
-    logger.info(f"Subscription: {SUBSCRIPTION_NAME}")
-    logger.info(f"Log Endpoint: {LOG_ENDPOINT}")
+  logger.info("Starting GCP Log Forwarder...")
+  logger.info(f"Log Endpoint: {LOG_ENDPOINT}")
 
-    server = start_health_server()
-
-    threading.Thread(
-        target=server.serve_forever,
-        daemon=True
-    ).start()
-
-    subscriber = pubsub_v1.SubscriberClient()
-    # subscription_path = subscriber.subscription_path(PROJECT_ID, SUBSCRIPTION_NAME)
-    subscription_path = SUBSCRIPTION_NAME
-
-    flow_control = pubsub_v1.types.FlowControl(max_messages=MAX_MESSAGES)
-
-    streaming_pull_future = subscriber.subscribe(
-        subscription_path,
-        callback=message_callback,
-        flow_control=flow_control,
-    )
-    logger.info("Streaming subscription started")
-
+  start_health_server()
+  subscriber = pubsub_v1.SubscriberClient()    
+  subscription_path = SUBSCRIPTION_NAME
+    
+  while not shutdown_event.is_set():
     try:
-        streaming_pull_future.result()
-    except Exception as e:
-        logger.error(f"Streaming pull stopped: {e}")
+      logger.info("Pulling messages from Pub/Sub...")
+      response = subscriber.pull(
+        request={"subscription": subscription_path, "max_messages": MAX_MESSAGES}
+      )
+      if not response.received_messages:
+        time.sleep(1)  # No messages, wait a bit
+        continue
+                
+      all_logs = []
+      message_results = []
+      
+      logger.info(f"Received {len(response.received_messages)} messages from Pub/Sub")
+      for message in response.received_messages:
+        message_data = message.message.data
+        decoded_str = message_data.decode("utf-8")
+        parsed_data = json.loads(decoded_str)
+        log_entries = parsed_data if isinstance(parsed_data, list) else [parsed_data]
+        for log_entry in log_entries:
+          if is_alb_log(log_entry):
+            processed_log = process_alb_logs(log_entry)
+            all_logs.append(processed_log)
+            message_results.append(message.ack_id)
+          else:
+            logger.info(f"Non-ALB log received: {log_entry}")
+            message_results.append(message.ack_id)
 
+      logger.info(f"Processed {len(all_logs)} logs")
+      
+      # step 2: ship logs
+      logger.info(f"Shipping {len(all_logs)} logs to CubeAPM")
+      if all_logs:
+        shipping_success = ship_logs(all_logs)
+        if shipping_success:
+          logger.info(f"Successfully shipped {len(all_logs)} logs to CubeAPM")
+          subscriber.acknowledge(request={"subscription": subscription_path, "ack_ids": message_results})
+          time.sleep(0.5)
+            
+    except Exception as e:
+      logger.error(f"Error in main loop: {e}")
+      time.sleep(5)
+
+
+if __name__ == "__main__":
+    main()

@@ -50,7 +50,47 @@ gcloud pubsub topics create gcp-logs
 
 4. **Configure GCP log routing** to send logs to the Pub/Sub topic.
 
-## Testing
+## Local Development
+
+### Prerequisites
+
+Make sure you have Application Default Credentials set up:
+```bash
+gcloud auth application-default login
+```
+
+This will create `~/.config/gcloud/application_default_credentials.json` which the Docker container will use for authentication.
+
+### Running with Docker
+
+Build the Docker image:
+```bash
+docker build -t logs-forwarder-gcp .
+```
+
+Run locally with your gcloud credentials:
+```bash
+docker run -it --rm \
+  -v ~/.config/gcloud:/root/.config/gcloud \
+  -e GOOGLE_CLOUD_PROJECT="able-reef-466806-u4" \
+  -e PUBSUB_SUBSCRIPTION="projects/able-reef-466806-u4/subscriptions/pull-subs" \
+  -e LOG_ENDPOINT="https://your-endpoint.com/api/logs/insert/jsonline" \
+  -e CUBE_ENVIRONMENT="local" \
+  logs-forwarder-gcp
+```
+
+Or using a service account key:
+```bash
+docker run -it --rm \
+  -v /path/to/service-account-key.json:/tmp/key.json \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/key.json \
+  -e GOOGLE_CLOUD_PROJECT="able-reef-466806-u4" \
+  -e PUBSUB_SUBSCRIPTION="projects/able-reef-466806-u4/subscriptions/pull-subs" \
+  -e LOG_ENDPOINT="https://your-endpoint.com/api/logs/insert/jsonline" \
+  logs-forwarder-gcp
+```
+
+### Testing Without Docker
 
 Test locally with sample data:
 ```bash
