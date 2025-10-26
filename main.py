@@ -4,20 +4,15 @@ GCP Log Forwarder for ALB and other GCP logs
 Pulls GCP Pub/Sub messages containing log entries and forwards them to CubeAPM.
 """
 
-import base64
 import gzip
 import json
 import logging
 import os
 import signal
-import socket
 import sys
 import threading
 import time
-import urllib.error
-import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Any
 
 from google.cloud import pubsub_v1
@@ -45,7 +40,7 @@ if not SUBSCRIPTION_NAME:
 
 # CubeAPM Configuration
 CUBE_ENVIRONMENT_KEY = os.environ.get("CUBE_ENVIRONMENT_KEY", "cube.environment")
-CUBE_ENVIRONMENT = os.environ.get("CUBE_ENVIRONMENT")
+CUBE_ENVIRONMENT = os.environ.get("CUBE_ENVIRONMENT", "UNSET")
 CUBE_EXTRA_FIELDS = os.environ.get("CUBE_EXTRA_FIELDS", "")
 CUBE_STREAM_FIELDS = os.environ.get("CUBE_STREAM_FIELDS", "event.domain")
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "60"))
@@ -112,7 +107,6 @@ def signal_handler(signum, frame):
     shutdown_event.set()
 
 
-# Initialize Flask app
 app = Flask(__name__)
 
 @app.route("/health")
@@ -164,8 +158,6 @@ def ship_logs(log_entries: List[str]) -> bool:
 
 
 def main():
-  global processed_count, error_count
-    
   try:
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -194,8 +186,15 @@ def main():
       
       logger.info(f"Received {len(response.received_messages)} messages from Pub/Sub")
       for message in response.received_messages:
+        logger.info("processing message", message)
         message_data = message.message.data
+        if not message_data:
+          logger.info("Received empty message data")
+          continue
         decoded_str = message_data.decode("utf-8")
+        if not decoded_str:
+          logger.info("Received empty decoded message")
+          continue
         parsed_data = json.loads(decoded_str)
         log_entries = parsed_data if isinstance(parsed_data, list) else [parsed_data]
         for log_entry in log_entries:
