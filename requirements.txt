@@ -3,3 +3,4 @@ google-cloud-pubsub>=2.0.0
 google-cloud-logging>=3.0.0
 requests>=2.25.0
 flask>=2.0.0
+waitress>=2.1.0
