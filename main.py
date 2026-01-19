@@ -13,7 +13,6 @@ import sys
 import threading
 import time
 import urllib.request
-import socket
 from typing import Dict, List, Any
 
 from google.cloud import pubsub_v1
@@ -121,47 +120,6 @@ def health():
     'uptime': time.time() - start_time,
   }), 200
 
-def is_port_listening(port, host='0.0.0.0', max_retries=20):
-  """Check if a port is listening"""
-  for _ in range(max_retries):
-    try:
-      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-      sock.settimeout(0.5)
-      result = sock.connect_ex((host if host != '0.0.0.0' else '127.0.0.1', port))
-      sock.close()
-      if result == 0:
-        return True
-    except:
-      pass
-    time.sleep(0.5)
-  return False
-
-def start_health_server():
-  """Start Flask server for health checks using Waitress (production WSGI server)"""
-  port = int(os.environ.get("PORT", "8080"))
-  logger.info(f"Starting health check server on port {port}")
-  
-  # Run Waitress server in a separate thread
-  def run_server():
-    try:
-      # Waitress is a production WSGI server that works reliably in containers
-      logger.info(f"Waitress server starting on 0.0.0.0:{port}")
-      serve(app, host='0.0.0.0', port=port, threads=2, channel_timeout=120)
-    except Exception as e:
-      logger.error(f"Health server error: {e}", exc_info=True)
-      raise
-  
-  # Use non-daemon thread so it keeps the process alive
-  health_thread = threading.Thread(target=run_server, daemon=False)
-  health_thread.start()
-  
-  # Wait for server to actually bind to the port
-  logger.info("Waiting for server to bind to port...")
-  if is_port_listening(port):
-    logger.info(f"Health check server is ready and listening on port {port}")
-  else:
-    logger.error(f"Health check server failed to bind to port {port} within timeout")
-    raise RuntimeError(f"Server failed to start on port {port}")
 
 def ship_logs(log_entries: List[str]) -> bool:
   """Ship multiple log entries to CubeAPM endpoint"""
@@ -255,22 +213,20 @@ def main():
   logger.info("Starting GCP Log Forwarder...")
   logger.info(f"Log Endpoint: {LOG_ENDPOINT}")
 
-  # Start health server first - this must be ready for Cloud Run health checks
-  start_health_server()
-  
-  # Start Pub/Sub worker in a background thread
+  # Start Pub/Sub worker in a background thread (daemon so it doesn't block shutdown)
   pubsub_thread = threading.Thread(target=pubsub_worker, daemon=True)
   pubsub_thread.start()
   logger.info("Pub/Sub worker thread started")
   
-  # Keep main thread alive - Flask server runs in non-daemon thread
-  # This ensures the process stays alive for Cloud Run
+  # Run Waitress server in the main thread (blocking)
+  # This is the standard pattern for WSGI servers and ensures Cloud Run sees the server
+  port = int(os.environ.get("PORT", "8080"))
+  logger.info(f"Starting Waitress server on 0.0.0.0:{port}")
   try:
-    while not shutdown_event.is_set():
-      time.sleep(1)
-  except KeyboardInterrupt:
-    logger.info("Received keyboard interrupt, shutting down...")
-    shutdown_event.set()
+    serve(app, host='0.0.0.0', port=port, threads=2, channel_timeout=120)
+  except Exception as e:
+    logger.error(f"Waitress server error: {e}", exc_info=True)
+    raise
 
 
 if __name__ == "__main__":
