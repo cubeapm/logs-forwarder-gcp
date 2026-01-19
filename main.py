@@ -123,8 +123,9 @@ def start_health_server():
       app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
     except Exception as e:
       logger.error(f"Health server error: {e}")
-  health_thread = threading.Thread(target=run_server, daemon=True)
+  health_thread = threading.Thread(target=run_server, daemon=False)
   health_thread.start()
+  time.sleep(2)
 
 def ship_logs(log_entries: List[str]) -> bool:
   """Ship multiple log entries to CubeAPM endpoint"""
